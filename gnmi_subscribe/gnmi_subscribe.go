@@ -18,15 +18,21 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"strings"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 
 	log "github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
-	"github.com/google/gnxi/utils/credentials"
-	"github.com/google/gnxi/utils/xpath"
-	"github.com/openconfig/gnmi/proto/gnmi"
-	pb "github.com/openconfig/gnmi/proto/gnmi"
-	"google.golang.org/grpc"
+
+	dopb "github.com/infinera/gnmi/proto/gnmi"
+	pb "github.com/infinera/gnmi/proto/gnmi"
+	"github.com/infinera/gnxi/utils/credentials"
+	"github.com/infinera/gnxi/utils/xpath"
 )
 
 type arrayFlags []string
@@ -53,13 +59,148 @@ var (
 	suppressRedundant = flag.Bool("suppress_redundant", false, "If true, in SAMPLE mode, unchanged values are not sent by the target")
 	heartbeatInterval = flag.Uint64("heartbeat_interval", 0, "Specifies maximum allowed period of silence in seconds when surpress redundant is used")
 	updatesOnly       = flag.Bool("updates_only", false, "If true, the target only transmits updates to the subscribed paths")
+	dialoutAddr       = flag.String("dialout_bind_addr", "", "The collector's <IP:Port> at which it is listening for incoming reversed gNMI RPC requests.")
 )
+
+type server struct {
+}
+
+/*
+func parseDialOutPaths(xPathFlags, pbPathFlags arrayFlags) ([]*dopb.Path, error) {
+	var pbPathList []*dopb.Path
+	for _, xPath := range xPathFlags {
+		pbPath, err := xpath.ToReverseGNMIPath(xPath)
+		if err != nil {
+			return nil, fmt.Errorf("error in parsing xpath %q to gnmi path", xPath)
+		}
+		pbPathList = append(pbPathList, pbPath)
+	}
+	for _, textPbPath := range pbPathFlags {
+		var pbPath dopb.Path
+		if err := proto.UnmarshalText(textPbPath, &pbPath); err != nil {
+			return nil, fmt.Errorf("error in unmarshaling %q to gnmi Path", textPbPath)
+		}
+		pbPathList = append(pbPathList, &pbPath)
+	}
+	return pbPathList, nil
+}
+
+func assembleDialOutSubscriptions(streamOnChange bool, sampleInterval uint64, paths []*dopb.Path) ([]*dopb.Subscription, error) {
+	var subscriptions []*dopb.Subscription
+	var subscriptionMode dopb.SubscriptionMode
+	switch {
+	case streamOnChange && sampleInterval != 0:
+		return nil, errors.New("only one of -stream_on_change and -sample_interval can be set")
+	case streamOnChange:
+		subscriptionMode = dopb.SubscriptionMode_ON_CHANGE
+	case sampleInterval != 0:
+		subscriptionMode = dopb.SubscriptionMode_SAMPLE
+	default:
+		subscriptionMode = dopb.SubscriptionMode_TARGET_DEFINED
+	}
+	for _, path := range paths {
+		subscription := &dopb.Subscription{
+			Path:              path,
+			Mode:              subscriptionMode,
+			SampleInterval:    sampleInterval,
+			SuppressRedundant: *suppressRedundant,
+			HeartbeatInterval: *heartbeatInterval,
+		}
+		subscriptions = append(subscriptions, subscription)
+	}
+	return subscriptions, nil
+}
+*/
+
+func (s *server) Subscribe(stream dopb.GNMIReverse_SubscribeServer) error {
+	log.Info("Invoked gNMI Reverse 'Subscribe()' Dial-Out RPC...")
+	ctx := stream.Context()
+	client, _ := peer.FromContext(ctx)
+	clientSocket := client.Addr.String()
+	log.Info("Dial-out Connection from Agent: ", clientSocket)
+
+	// Send a single SubscribeRequest message to the dial-out telemetry target
+	pbPathList, err := parsePaths(xPathFlags, pbPathFlags)
+	if err != nil {
+		log.Exitf("Error parsing paths: %v", err)
+	}
+
+	subscriptions, err := assembleSubscriptions(*streamOnChange, *sampleInterval, pbPathList)
+	if err != nil {
+		log.Exitf("Error assembling subscriptions: %v", err)
+	}
+
+	request := &dopb.SubscribeRequest{
+		Request: &dopb.SubscribeRequest_Subscribe{
+			Subscribe: &dopb.SubscriptionList{
+				Encoding:     dopb.Encoding(dopb.Encoding_JSON_IETF),
+				Mode:         dopb.SubscriptionList_STREAM,
+				Subscription: subscriptions,
+				UpdatesOnly:  *updatesOnly,
+			},
+		},
+	}
+	log.V(1).Info("SubscribeRequest:\n", proto.MarshalTextString(request))
+	stream.Send(request)
+
+	var retStatus error = nil
+
+	// Spin forever and Receive streaming updates from the agent
+	for {
+		telemetryData, e := stream.Recv()
+		ctxErr := ctx.Err()
+
+		if (e == io.EOF) || (e != nil) || (ctxErr != nil) {
+			msg := "Agent " + clientSocket + " closed the gRPC session."
+			log.Info(msg)
+			if ctxErr != nil {
+				retStatus = ctxErr
+			} else {
+				retStatus = status.Error(codes.OK, "Goodbye!")
+			}
+			break
+		}
+		log.Info(telemetryData)
+	}
+
+	return retStatus
+}
+
+// DialOutSubscribe implements the reversed dial-out Subscribe RPC.
+// In case of dial-out, this gNxI Subscribe will acts as a TCP/HTTP/2
+// "server" and is listening for incoming connections from the target
+// device that acts as a "client".
+func DialOutSubscribe() {
+	log.Info("Starting the gNxI Subscribe collector in dial-out mode...")
+
+	listen, err := net.Listen("tcp", *dialoutAddr)
+	if err != nil {
+		log.Fatalf("Failed to listen: %v", err)
+	}
+
+	opts := credentials.ServerCredentials()
+	grpcServer := grpc.NewServer(opts...)
+	dopb.RegisterGNMIReverseServer(grpcServer, &server{})
+
+	log.Info("Collector listening on ", *dialoutAddr)
+
+	if err := grpcServer.Serve(listen); err != nil {
+		log.Fatalf("Failed to serve: %v", err)
+	}
+}
 
 func main() {
 	flag.Var(&xPathFlags, "xpath", "xpath of the config node to be fetched")
 	flag.Var(&pbPathFlags, "pbpath", "protobuf format path of the config node to be fetched")
 	flag.Set("logtostderr", "true")
 	flag.Parse()
+
+	// Check if dial-out mode was requested. The gNxI Subscribe collector
+	// fully works either in dial-in mode, or only in dial-out mode
+	if *dialoutAddr != "" {
+		DialOutSubscribe()
+		return
+	}
 
 	opts := credentials.ClientCredentials()
 	conn, err := grpc.Dial(*targetAddr, opts...)
@@ -82,15 +223,38 @@ func main() {
 		log.Fatalf("Error creating GNMI_SubscribeClient: %v", err)
 	}
 
-	encoding, err := parseEncoding(*encodingFormat)
-	if err != nil {
-		log.Exitf("Error parsing encoding: %v", err)
-	}
-
 	subscriptionListMode, err := subscriptionMode(*subscriptionPoll, *subscriptionOnce)
 	if err != nil {
 		flag.Usage()
 		log.Exit(err)
+	}
+
+	request := prepareGNMISubscribeRequest(subscriptionListMode)
+
+	if err := subscribeClient.Send(request); err != nil {
+		log.Exitf("Failed to send request: %v", err)
+	}
+
+	switch subscriptionListMode {
+	case pb.SubscriptionList_STREAM:
+		if err := stream(subscribeClient); err != nil {
+			log.Exitf("Error using STREAM mode: %v", err)
+		}
+	case pb.SubscriptionList_POLL:
+		if err := poll(subscribeClient, *updatesOnly, pollUser); err != nil {
+			log.Exitf("Error using POLL mode: %v", err)
+		}
+	case pb.SubscriptionList_ONCE:
+		if err := once(subscribeClient); err != nil {
+			log.Exitf("Error using ONCE mode: %v", err)
+		}
+	}
+}
+
+func prepareGNMISubscribeRequest(subscriptionListMode pb.SubscriptionList_Mode) *pb.SubscribeRequest {
+	encoding, err := parseEncoding(*encodingFormat)
+	if err != nil {
+		log.Exitf("Error parsing encoding: %v", err)
 	}
 
 	pbPathList, err := parsePaths(xPathFlags, pbPathFlags)
@@ -114,25 +278,7 @@ func main() {
 		},
 	}
 	log.V(1).Info("SubscribeRequest:\n", proto.MarshalTextString(request))
-
-	if err := subscribeClient.Send(request); err != nil {
-		log.Exitf("Failed to send request: %v", err)
-	}
-
-	switch subscriptionListMode {
-	case pb.SubscriptionList_STREAM:
-		if err := stream(subscribeClient); err != nil {
-			log.Exitf("Error using STREAM mode: %v", err)
-		}
-	case pb.SubscriptionList_POLL:
-		if err := poll(subscribeClient, *updatesOnly, pollUser); err != nil {
-			log.Exitf("Error using POLL mode: %v", err)
-		}
-	case pb.SubscriptionList_ONCE:
-		if err := once(subscribeClient); err != nil {
-			log.Exitf("Error using ONCE mode: %v", err)
-		}
-	}
+	return request
 }
 
 func pollUser() {
@@ -140,7 +286,7 @@ func pollUser() {
 	fmt.Scanln()
 }
 
-func stream(subscribeClient gnmi.GNMI_SubscribeClient) error {
+func stream(subscribeClient pb.GNMI_SubscribeClient) error {
 	for {
 		if closed, err := receiveNotifications(subscribeClient); err != nil {
 			return err
@@ -150,7 +296,7 @@ func stream(subscribeClient gnmi.GNMI_SubscribeClient) error {
 	}
 }
 
-func poll(subscribeClient gnmi.GNMI_SubscribeClient, updatesOnly bool, pollInput func()) error {
+func poll(subscribeClient pb.GNMI_SubscribeClient, updatesOnly bool, pollInput func()) error {
 	ready := make(chan bool, 1)
 	ready <- true
 	pollRequest := &pb.SubscribeRequest{Request: &pb.SubscribeRequest_Poll{}}
@@ -184,14 +330,14 @@ func poll(subscribeClient gnmi.GNMI_SubscribeClient, updatesOnly bool, pollInput
 
 }
 
-func once(subscribeClient gnmi.GNMI_SubscribeClient) error {
+func once(subscribeClient pb.GNMI_SubscribeClient) error {
 	if _, err := receiveNotifications(subscribeClient); err != nil {
 		return err
 	}
 	return nil
 }
 
-func receiveNotifications(subscribeClient gnmi.GNMI_SubscribeClient) (bool, error) {
+func receiveNotifications(subscribeClient pb.GNMI_SubscribeClient) (bool, error) {
 	for {
 		res, err := subscribeClient.Recv()
 		if err == io.EOF {
@@ -214,7 +360,7 @@ func receiveNotifications(subscribeClient gnmi.GNMI_SubscribeClient) (bool, erro
 
 func assembleSubscriptions(streamOnChange bool, sampleInterval uint64, paths []*pb.Path) ([]*pb.Subscription, error) {
 	var subscriptions []*pb.Subscription
-	var subscriptionMode gnmi.SubscriptionMode
+	var subscriptionMode pb.SubscriptionMode
 	switch {
 	case streamOnChange && sampleInterval != 0:
 		return nil, errors.New("only one of -stream_on_change and -sample_interval can be set")
@@ -238,7 +384,7 @@ func assembleSubscriptions(streamOnChange bool, sampleInterval uint64, paths []*
 	return subscriptions, nil
 }
 
-func subscriptionMode(subscriptionPoll, subscriptionOnce bool) (gnmi.SubscriptionList_Mode, error) {
+func subscriptionMode(subscriptionPoll, subscriptionOnce bool) (pb.SubscriptionList_Mode, error) {
 	switch {
 	case subscriptionPoll && subscriptionOnce:
 		return 0, errors.New("only one of -once and -poll can be set")
@@ -270,7 +416,7 @@ func parsePaths(xPathFlags, pbPathFlags arrayFlags) ([]*pb.Path, error) {
 	return pbPathList, nil
 }
 
-func parseEncoding(encodingFormat string) (gnmi.Encoding, error) {
+func parseEncoding(encodingFormat string) (pb.Encoding, error) {
 	encoding, ok := pb.Encoding_value[encodingFormat]
 	if !ok {
 		var encodingList []string

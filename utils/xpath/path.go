@@ -19,7 +19,7 @@ package xpath
 import (
 	"fmt"
 
-	pb "github.com/openconfig/gnmi/proto/gnmi"
+	pb "github.com/infinera/gnmi/proto/gnmi"
 )
 
 // ToGNMIPath parses an xpath string into a gnmi Path struct defined in gnmi

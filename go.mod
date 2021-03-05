@@ -11,11 +11,12 @@ require (
 	github.com/google/go-cmp v0.5.3
 	github.com/google/uuid v1.1.2
 	github.com/gorilla/mux v1.8.0
+	github.com/infinera/gnmi v0.0.0-20210204234433-4756b763cf96
 	github.com/kylelemons/godebug v1.1.0
 	github.com/mholt/archiver/v3 v3.5.0
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/moby/moby v1.13.1
-	github.com/openconfig/gnmi v0.0.0-20200617225440-d2b4e6a45802
+	github.com/openconfig/gnmi v0.0.0-20210204173831-88610ee25fee
 	github.com/openconfig/goyang v0.2.3
 	github.com/openconfig/ygot v0.9.0
 	github.com/spf13/afero v1.4.1
