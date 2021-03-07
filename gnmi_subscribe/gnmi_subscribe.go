@@ -65,53 +65,6 @@ var (
 type server struct {
 }
 
-/*
-func parseDialOutPaths(xPathFlags, pbPathFlags arrayFlags) ([]*dopb.Path, error) {
-	var pbPathList []*dopb.Path
-	for _, xPath := range xPathFlags {
-		pbPath, err := xpath.ToReverseGNMIPath(xPath)
-		if err != nil {
-			return nil, fmt.Errorf("error in parsing xpath %q to gnmi path", xPath)
-		}
-		pbPathList = append(pbPathList, pbPath)
-	}
-	for _, textPbPath := range pbPathFlags {
-		var pbPath dopb.Path
-		if err := proto.UnmarshalText(textPbPath, &pbPath); err != nil {
-			return nil, fmt.Errorf("error in unmarshaling %q to gnmi Path", textPbPath)
-		}
-		pbPathList = append(pbPathList, &pbPath)
-	}
-	return pbPathList, nil
-}
-
-func assembleDialOutSubscriptions(streamOnChange bool, sampleInterval uint64, paths []*dopb.Path) ([]*dopb.Subscription, error) {
-	var subscriptions []*dopb.Subscription
-	var subscriptionMode dopb.SubscriptionMode
-	switch {
-	case streamOnChange && sampleInterval != 0:
-		return nil, errors.New("only one of -stream_on_change and -sample_interval can be set")
-	case streamOnChange:
-		subscriptionMode = dopb.SubscriptionMode_ON_CHANGE
-	case sampleInterval != 0:
-		subscriptionMode = dopb.SubscriptionMode_SAMPLE
-	default:
-		subscriptionMode = dopb.SubscriptionMode_TARGET_DEFINED
-	}
-	for _, path := range paths {
-		subscription := &dopb.Subscription{
-			Path:              path,
-			Mode:              subscriptionMode,
-			SampleInterval:    sampleInterval,
-			SuppressRedundant: *suppressRedundant,
-			HeartbeatInterval: *heartbeatInterval,
-		}
-		subscriptions = append(subscriptions, subscription)
-	}
-	return subscriptions, nil
-}
-*/
-
 func (s *server) Subscribe(stream dopb.GNMIReverse_SubscribeServer) error {
 	log.Info("Invoked gNMI Reverse 'Subscribe()' Dial-Out RPC...")
 	ctx := stream.Context()
@@ -120,26 +73,7 @@ func (s *server) Subscribe(stream dopb.GNMIReverse_SubscribeServer) error {
 	log.Info("Dial-out Connection from Agent: ", clientSocket)
 
 	// Send a single SubscribeRequest message to the dial-out telemetry target
-	pbPathList, err := parsePaths(xPathFlags, pbPathFlags)
-	if err != nil {
-		log.Exitf("Error parsing paths: %v", err)
-	}
-
-	subscriptions, err := assembleSubscriptions(*streamOnChange, *sampleInterval, pbPathList)
-	if err != nil {
-		log.Exitf("Error assembling subscriptions: %v", err)
-	}
-
-	request := &dopb.SubscribeRequest{
-		Request: &dopb.SubscribeRequest_Subscribe{
-			Subscribe: &dopb.SubscriptionList{
-				Encoding:     dopb.Encoding(dopb.Encoding_JSON_IETF),
-				Mode:         dopb.SubscriptionList_STREAM,
-				Subscription: subscriptions,
-				UpdatesOnly:  *updatesOnly,
-			},
-		},
-	}
+	request := prepareGNMISubscribeRequest()
 	log.V(1).Info("SubscribeRequest:\n", proto.MarshalTextString(request))
 	stream.Send(request)
 
@@ -223,18 +157,13 @@ func main() {
 		log.Fatalf("Error creating GNMI_SubscribeClient: %v", err)
 	}
 
-	subscriptionListMode, err := subscriptionMode(*subscriptionPoll, *subscriptionOnce)
-	if err != nil {
-		flag.Usage()
-		log.Exit(err)
-	}
-
-	request := prepareGNMISubscribeRequest(subscriptionListMode)
+	request := prepareGNMISubscribeRequest()
 
 	if err := subscribeClient.Send(request); err != nil {
 		log.Exitf("Failed to send request: %v", err)
 	}
 
+	subscriptionListMode, _ := subscriptionMode(*subscriptionPoll, *subscriptionOnce)
 	switch subscriptionListMode {
 	case pb.SubscriptionList_STREAM:
 		if err := stream(subscribeClient); err != nil {
@@ -251,7 +180,13 @@ func main() {
 	}
 }
 
-func prepareGNMISubscribeRequest(subscriptionListMode pb.SubscriptionList_Mode) *pb.SubscribeRequest {
+func prepareGNMISubscribeRequest() *pb.SubscribeRequest {
+	subscriptionListMode, err := subscriptionMode(*subscriptionPoll, *subscriptionOnce)
+	if err != nil {
+		flag.Usage()
+		log.Exit(err)
+	}
+
 	encoding, err := parseEncoding(*encodingFormat)
 	if err != nil {
 		log.Exitf("Error parsing encoding: %v", err)
