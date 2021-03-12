@@ -65,6 +65,18 @@ var (
 type server struct {
 }
 
+func (s *server) Capabilities(context.Context, *dopb.CapabilityRequest) (*dopb.CapabilityResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "gNMI RPC 'Capabilities' not implemented")
+}
+
+func (s *server) Get(context.Context, *dopb.GetRequest) (*dopb.GetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "gNMI RPC 'Get' not implemented")
+}
+
+func (s *server) Set(context.Context, *dopb.SetRequest) (*dopb.SetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "gNMI RPC 'Set' not implemented")
+}
+
 func (s *server) Subscribe(stream dopb.GNMIReverse_SubscribeServer) error {
 	log.Info("Invoked gNMI Reverse 'Subscribe()' Dial-Out RPC...")
 	ctx := stream.Context()
